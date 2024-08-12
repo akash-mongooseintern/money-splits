@@ -63,6 +63,8 @@ model User {
   meta                    UserMeta?
   settings                UserSetting[]
   transactionUserRelation TransactionUserRelation[]
+  lender                  Settlements[]             @relation("lender")
+  borrower                Settlements[]             @relation("borrower")
 
   @@map("user")
 }
@@ -174,6 +176,7 @@ model Transactions {
   createAt                DateTime                  @default(now()) @map("created_at")
   updatedAt               DateTime                  @updatedAt @map("updated_at")
   meta                    TransactionMeta?
+  settlements             Settlements[]
 
   @@map("transactions")
 }
@@ -195,4 +198,23 @@ model TransactionMeta {
   totalPerson   Int          @map("total_person")
 
   @@map("transaction_meta")
+}
+
+enum SettlementsStatus {
+  Pending   @map("pending")
+  Completed @map("completed")
+}
+
+model Settlements {
+  transactionId Int               @map("transaction_id")
+  transaction   Transactions      @relation(fields: [transactionId], references: [id])
+  amount        Float
+  lenderId      String            @map("lender_id") @db.Uuid
+  lender        User              @relation("lender", fields: [lenderId], references: [id])
+  borrowerId    String            @map("borrower_id") @db.Uuid
+  borrower      User              @relation("borrower", fields: [borrowerId], references: [id])
+  status        SettlementsStatus @default(Pending)
+
+  @@unique([transactionId, lenderId, borrowerId])
+  @@map("settlements")
 }

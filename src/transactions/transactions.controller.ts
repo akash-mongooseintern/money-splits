@@ -3,7 +3,6 @@ import { Body, Controller, Delete, Get, Param, ParseIntPipe, Post, Put, Req, Use
 import { ApiBearerAuth, ApiCreatedResponse, ApiOkResponse, ApiResponse, ApiTags } from "@nestjs/swagger";
 import { TransactionsService } from "./transactions.service";
 import { CreateTransactionDto } from "./dto/create-transaction.dto";
-import { IGetTransactionSplitsByTxnId } from "./transactions.interface";
 import { SuccessResponseDto } from "../common/dto/success-response.dto";
 import { QuickSplitsDto } from "./dto/quick-splits.dto";
 import { UpdateTransactionDto } from "./dto/update-transaction.dto";
@@ -21,13 +20,13 @@ export class TransactionsController extends BaseController {
     }
 
     @ApiOkResponse({
-        type: Promise<SuccessResponseDto<IGetTransactionSplitsByTxnId>>,
+        type: Promise<SuccessResponseDto<any>>,
         description: "It will return splits and settlement of transaction by transaction id"
     })
-    @Get('settlements/:transaction_id')
+    @Get(':transaction_id/settlements')
     async getTransactionSplitsByTxnId(
         @Param('transaction_id') txnId: number
-    ) : Promise<SuccessResponseDto<IGetTransactionSplitsByTxnId>> {
+    ) : Promise<SuccessResponseDto<string[]>> {
         return new SuccessResponseDto(await this.transactionsService.getTransactionSplitsByTxnId(txnId))
     }
 
@@ -37,7 +36,7 @@ export class TransactionsController extends BaseController {
     @Post()
     async createTransactionsMany(
         @Body() createTransactionDto: CreateTransactionDto[]
-    ): Promise<{ status: string }> {
+    ) : Promise<{ status: string }> {
         return await this.transactionsService.createManyTransaction(createTransactionDto)
     }
 
@@ -47,7 +46,7 @@ export class TransactionsController extends BaseController {
     @Post('quick-money-splits')
     getQuickSplits(
         @Body() quickSplitsDto: QuickSplitsDto
-    ): SuccessResponseDto<{ result : string }> {
+    ) : SuccessResponseDto<{ result : string }> {
         return new SuccessResponseDto(this.transactionsService.getQuickSplits(quickSplitsDto))
     }
 
@@ -75,7 +74,7 @@ export class TransactionsController extends BaseController {
     }
     
     @ApiResponse({
-        type: Promise<{ status: string} >
+        type: Promise<{ status: string }>
     })
     @Delete(':transaction_id')
     async deleteTransactionsById(

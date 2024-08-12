@@ -5,11 +5,14 @@ import { ICreateTransaction, IGetTransactionSplitsByTxnId, ISettlementArray, ITr
 import { Transactions } from "@prisma/client";
 import { QuickSplitsDto } from "./dto/quick-splits.dto";
 import { UpdateTransactionDto } from "./dto/update-transaction.dto";
+import { SettlementsService } from "../settlements/settlements.service";
+import { ICreateSettlements } from "../settlements/settlements.interface";
 
 @Injectable()
 export class TransactionsService {
     constructor(
-        private readonly prismaService: PrismaService
+        private readonly prismaService: PrismaService,
+        private readonly settlementsService: SettlementsService
     ) { }
 
     async findUniqueTransactionById(id: number): Promise<Transactions | null> {
@@ -18,7 +21,7 @@ export class TransactionsService {
 
     async getTransactionSplitsByTxnId(
         txnId: number
-    ): Promise<IGetTransactionSplitsByTxnId> {
+    ): Promise<string[]> {
         const txn = await this.findUniqueTransactionById(txnId)
         let parentTransactionId: number;
         if (txn) {
@@ -26,96 +29,84 @@ export class TransactionsService {
         } else {
             throw new Error('Invalid transaction ID!')
         }
-        const result = await this.prismaService.transactions.findMany({
+        const queryResult = await this.prismaService.settlements.findMany({
             where: {
-                OR: [
-                    {
-                        id: parentTransactionId,
-                    },
-                    {
-                        parentTransactionId: parentTransactionId
-                    }
-                ]
+                transactionId: parentTransactionId
             },
-            include: {
-                transactionUserRelation: {
-                    include: {
-                        user: {
-                            select: {
-                                firstname: true,
-                                lastname: true,
-                                email: true
-                            }
-                        }
+            select: {
+                amount: true,
+                lender: {
+                    select: {
+                        firstname: true,
+                        lastname: true,
+                    }
+                },
+                borrower: {
+                    select: {
+                        firstname: true,
+                        lastname: true,
                     }
                 }
             }
         })
-        const txnMeta = await this.prismaService.transactionMeta.findUnique({
-            where: {
-                transactionId: parentTransactionId
-            }
-        })
-        if (!txnMeta || !result) throw new BadRequestException('Record not found! Please check transaction Id')
-        return await this.calculateSplits(txnMeta.amount, txnMeta.totalPerson, result)
+        return queryResult.map(item => `${item.borrower.firstname} ${item.borrower.lastname} will pay ${item.amount.toFixed(2)} rupee to ${item.lender.firstname} ${item.lender.lastname}`)
     }
 
-    async calculateSplits(
+    async calculateSplitsAndUpdateOrCreateSettlements(
         totalAmount: number,
-        totalPerson: number,
-        data: ITransactionDataToCalculateSplit[]
-    ) : Promise<IGetTransactionSplitsByTxnId> {
-        
-            const res: IGetTransactionSplitsByTxnId = {
-                totalAmount: totalAmount,
-                totalPerson: totalPerson,
-                splitsInto: totalAmount / totalPerson,
-                details: [],
-                settlement: []
-            }
+        txnId: number,
+        createTransactionDto: CreateTransactionDto[],
+        isCreateSettlements?: boolean
+    ) : Promise<void> {
+            const meanAmount = totalAmount/createTransactionDto.length
             const settlementArr: ISettlementArray = {
                 lender: [],
                 borrower: []
             }
-            res.details = data.map((item) => {
-                const { user } = item.transactionUserRelation[0]
-    
-                if (res.splitsInto > item.amount) {
+            createTransactionDto.map((item) => {
+                if (meanAmount > item.amount) {
                     settlementArr.borrower.push({
                         amount: item.amount,
-                        user: item.transactionUserRelation[0].user
+                        userId: item.userId
                     })
                 } else {
                     settlementArr.lender.push({
                         amount: item.amount,
-                        user: item.transactionUserRelation[0].user
+                        userId: item.userId
                     })
-                }
-                return {
-                    name: `${user.firstname} ${user.lastname}`,
-                    description: `${user.firstname} ${user.lastname} paid ${item.amount} rupee`
                 }
             })
             const { lender, borrower } = settlementArr
             let borrowerIndex = 0;
             let lenderIndex = 0;
+            let createOrUpdateSettlements : ICreateSettlements[] = []
             while (borrowerIndex < borrower.length && lenderIndex < lender.length) {
-                if (borrower[borrowerIndex].amount === res.splitsInto) {
+                if (borrower[borrowerIndex].amount === meanAmount) {
                     borrowerIndex++
                     continue
                 }
-                if (lender[lenderIndex].amount === res.splitsInto) {
+                if (lender[lenderIndex].amount === meanAmount) {
                     lenderIndex++
                     continue
                 }
-                const payment = Math.min(res.splitsInto - borrower[borrowerIndex].amount, lender[lenderIndex].amount - res.splitsInto)
+                const payment = Math.min(meanAmount - borrower[borrowerIndex].amount, lender[lenderIndex].amount - meanAmount)
                 borrower[borrowerIndex].amount += payment
                 lender[lenderIndex].amount -= payment
-                const str = `${borrower[borrowerIndex].user.firstname} ${borrower[borrowerIndex].user.lastname} will have to pay ${lender[lenderIndex].user.firstname} ${lender[lenderIndex].user.lastname} ${payment.toFixed(2)} rupees!`
-                res.settlement.push(str)
+                const settlementData = {
+                    transactionId: txnId,
+                    amount: borrower[borrowerIndex].amount,
+                    borrowerId: borrower[borrowerIndex].userId,
+                    lenderId: lender[lenderIndex].userId
+                }
+                if(isCreateSettlements){
+                    createOrUpdateSettlements.push(settlementData)
+                }else{
+                    await this.settlementsService.updateSettlement(settlementData)
+                }
             }
-            res.splitsInto = +res.splitsInto.toFixed(2)
-            return res
+            if(isCreateSettlements){
+                await this.settlementsService.createManySettlements(createOrUpdateSettlements)
+            }
     }
 
     private async createTransaction(
@@ -154,13 +145,20 @@ export class TransactionsService {
                 txnData.amount = createTransactionDto[i].amount
                 await this.createTransaction(txnData, createTransactionDto[i].userId, i)
             }
+            if(!txnData.parentTransactionId) throw new Error('Transaction ID is missing!')
             await this.prismaService.transactionMeta.create({
                 data: {
-                    transactionId: txnData.parentTransactionId as number,
+                    transactionId: txnData.parentTransactionId,
                     amount: totalAmount,
                     totalPerson: createTransactionDto.length,
                 }
             })
+            await this.calculateSplitsAndUpdateOrCreateSettlements(
+                totalAmount,
+                txnData.parentTransactionId,
+                createTransactionDto,
+                true
+            )
         }).then(() => {
             return {
                 status: 'success!'
@@ -196,7 +194,7 @@ export class TransactionsService {
             })
             if(!result) throw new Error('Record not found!')
             const txnUsrRel = result.transactionUserRelation[0]
-            await txn.transactionMeta.update({
+            const updateTxnMeta = await txn.transactionMeta.update({
                 where: {
                     transactionId: result.parentTransactionId ?? result.id
                 },
@@ -210,6 +208,33 @@ export class TransactionsService {
                 }
             })
             await this.deleteTransactionAndRelation(txnId, txnUsrRel.userId)
+            await this.settlementsService.deleteSettlements({
+                transactionId: result.parentTransactionId ?? result.id
+            })
+            const txnsData = await this.prismaService.transactions.findMany({
+                where: {
+                    OR: [
+                        {
+                            id: result.parentTransactionId ?? result.id
+                        },
+                        {
+                            parentTransactionId: result.parentTransactionId ?? result.id
+                        }
+                    ]
+                },
+                include: {
+                    transactionUserRelation: true
+                }
+            })
+            const settlementData = txnsData.map(item => ({
+                amount: item.amount,
+                userId: item.transactionUserRelation[0].userId
+            }))
+            await this.calculateSplitsAndUpdateOrCreateSettlements(
+                updateTxnMeta.amount,
+                updateTxnMeta.transactionId,
+                settlementData
+            )
             return {
                 status: 'Successful!'
             }
@@ -244,6 +269,9 @@ export class TransactionsService {
                 where: {
                     transactionId: parentTransactionId
                 }
+            })
+            await this.settlementsService.deleteSettlements({
+                transactionId: parentTransactionId
             })
             for(let i = 0; i< result.length; i++){
                 await this.deleteTransactionAndRelation(result[i].id, result[i].transactionUserRelation[0].userId)
@@ -282,9 +310,10 @@ export class TransactionsService {
             if(!existTxn) throw new Error('Record not found!')
             const isIncrement = updateTransactionDto.amount > existTxn.amount
             const amountDiff = Math.abs(existTxn.amount - updateTransactionDto.amount)
-            await txn.transactionMeta.update({
+            const parentTransactionId = existTxn.parentTransactionId ?? existTxn.id
+            const newTxnMeta = await txn.transactionMeta.update({
                 where: {
-                    transactionId: existTxn.parentTransactionId ?? existTxn.id
+                    transactionId: parentTransactionId
                 },
                 data:{
                     amount: {
@@ -292,6 +321,7 @@ export class TransactionsService {
                     }
                 }
             })
+            await this.settlementsService.updateManySettlement(parentTransactionId, 0)
             await txn.transactions.update({
                 where: {
                     id: txnId
@@ -300,6 +330,39 @@ export class TransactionsService {
                     amount: updateTransactionDto.amount
                 }
             })
+            const transactionData = await this.prismaService.transactions.findMany({
+                where: {
+                    OR: [
+                        {
+                            id: newTxnMeta.transactionId
+                        },
+                        {
+                            parentTransactionId: newTxnMeta.transactionId
+                        }
+                    ]
+                },
+                select: {
+                    amount: true,
+                    transactionUserRelation: {
+                        include: {
+                            user: {
+                                select: {
+                                    id: true
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            const mappedTxnData = transactionData.map(item => ({
+                userId: item.transactionUserRelation[0].userId,
+                amount: item.amount
+            }))
+            await this.calculateSplitsAndUpdateOrCreateSettlements(
+                newTxnMeta.amount, 
+                newTxnMeta.transactionId, 
+                mappedTxnData
+            )
             return {
                 status: 'successful!'
             }

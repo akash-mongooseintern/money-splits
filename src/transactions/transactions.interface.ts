@@ -37,7 +37,7 @@ interface IUserSelect {
 }
 
 interface IUserAndAmount {
-    user: IUserSelect,
+    userId: string,
     amount: number
 }
 
